@@ -34,6 +34,8 @@
       color: #fff; text-align: center;
       border: 1px solid #444;
       box-sizing: border-box;
+      max-height: 90vh;
+      overflow-y: auto;
     }
     h3 { margin: 0 0 10px 0; font-size: 1.1rem; }
     label { display: block; text-align: left; font-size: 0.8rem; color: #ccc; margin-top: 8px; }
@@ -54,6 +56,21 @@
     .checkbox-label input {
       width: auto;
       margin: 0;
+    }
+    .search-box {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .search-box input {
+      flex: 1;
+    }
+    .search-box button {
+      width: auto;
+      padding: 0 14px;
+      margin-top: 0;
+      background: #28a745;
+      white-space: nowrap;
     }
     button {
       width: 100%; padding: 12px; margin-top: 10px;
@@ -114,7 +131,7 @@
     let scene, cameraLeft, cameraRight, cameraRig, renderer, sphereMesh;
     const eyeGap = 0.5;
 
-    let statusEl, btnLoad, btnGyro, inputApiKey, chkSaveApiKey, inputLat, inputLng, inputZoom;
+    let statusEl, btnLoad, btnGyro, inputApiKey, chkSaveApiKey, inputSearch, btnSearch, inputLat, inputLng, inputZoom;
     let uiPanel, btnToggleUi, btnMap, mapOverlay, mapCloseBtn;
     let uiVisible = true;
 
@@ -133,6 +150,7 @@
     let currentCenterHeading = 0;
     let isMoving = false;
     let svService = null;
+    let geocoder = null;
     let googleMapsLoaded = false;
     let mapInited = false;
     let gMap = null;
@@ -341,6 +359,39 @@
       return texture;
     }
 
+    // キーワード検索から座標を取得して読み込む処理
+    function geocodeAddress() {
+      const apiKey = inputApiKey.value.trim();
+      const query = inputSearch.value.trim();
+
+      if (!apiKey) {
+        alert("APIキーを入力してください");
+        return;
+      }
+      if (!query) {
+        alert("検索したいキーワードを入力してください");
+        return;
+      }
+
+      statusEl.textContent = "キーワードを検索中...";
+
+      loadGoogleMapsScript(apiKey, () => {
+        if (!geocoder) geocoder = new google.maps.Geocoder();
+
+        geocoder.geocode({ address: query }, (results, status) => {
+          if (status === 'OK' && results[0]) {
+            const loc = results[0].geometry.location;
+            inputLat.value = loc.lat();
+            inputLng.value = loc.lng();
+            statusEl.textContent = `「${results[0].formatted_address}」が見つかりました。`;
+            loadPanorama();
+          } else {
+            statusEl.textContent = "検索エラー: 該当する場所が見つかりませんでした";
+          }
+        });
+      });
+    }
+
     async function loadPanorama() {
       const apiKey = inputApiKey.value.trim();
       const lat = inputLat.value.trim();
@@ -351,7 +402,6 @@
         return;
       }
 
-      // LocalStorageへの保存/削除処理
       if (chkSaveApiKey.checked) {
         localStorage.setItem('sv_vr_api_key', apiKey);
       } else {
@@ -552,6 +602,8 @@
       btnGyro = document.getElementById('btn-gyro');
       inputApiKey = document.getElementById('input-apikey');
       chkSaveApiKey = document.getElementById('chk-save-apikey');
+      inputSearch = document.getElementById('input-search');
+      btnSearch = document.getElementById('btn-search');
       inputLat = document.getElementById('input-lat');
       inputLng = document.getElementById('input-lng');
       inputZoom = document.getElementById('input-zoom');
@@ -561,7 +613,6 @@
       mapOverlay = document.getElementById('map-overlay');
       mapCloseBtn = document.getElementById('map-close');
 
-      // LocalStorageからAPIキーを読み込み
       const savedApiKey = localStorage.getItem('sv_vr_api_key');
       if (savedApiKey) {
         inputApiKey.value = savedApiKey;
@@ -569,6 +620,10 @@
       }
 
       btnLoad.addEventListener('click', loadPanorama);
+      btnSearch.addEventListener('click', geocodeAddress);
+      inputSearch.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') geocodeAddress();
+      });
       btnGyro.addEventListener('click', enableGyro);
       btnToggleUi.addEventListener('click', toggleUi);
       btnMap.addEventListener('click', openMap);
@@ -593,6 +648,12 @@
       <input type="checkbox" id="chk-save-apikey" />
       APIキーをこの端末に保存する
     </label>
+
+    <label for="input-search">キーワード検索 (地名・施設名)</label>
+    <div class="search-box">
+      <input id="input-search" type="text" placeholder="例: エッフェル塔, サグラダファミリア" />
+      <button id="btn-search">検索</button>
+    </div>
 
     <label for="input-lat">緯度 (lat)</label>
     <input id="input-lat" type="text" value="35.681236" />
