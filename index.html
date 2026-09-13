@@ -186,7 +186,9 @@
       scene.add(light);
 
       window.addEventListener('resize', onWindowResize);
-      window.addEventListener('click', onTapScreen);
+      
+      // VRゴーグル操作の感度改善：click から pointerdown に変更
+      window.addEventListener('pointerdown', onTapScreen);
 
       animate();
     }
@@ -359,7 +361,7 @@
       return texture;
     }
 
-    // キーワード検索から座標を取得して読み込む処理
+    // キーワード検索から拡大地図を表示する処理
     function geocodeAddress() {
       const apiKey = inputApiKey.value.trim();
       const query = inputSearch.value.trim();
@@ -383,8 +385,10 @@
             const loc = results[0].geometry.location;
             inputLat.value = loc.lat();
             inputLng.value = loc.lng();
-            statusEl.textContent = `「${results[0].formatted_address}」が見つかりました。`;
-            loadPanorama();
+            statusEl.textContent = `「${results[0].formatted_address}」の地図を開きました。タップで場所を選択してください。`;
+
+            // 地図を開いて検索位置へジャンプ（ズームレベル18で拡大表示）
+            openMapWithLocation(loc.lat(), loc.lng(), 18);
           } else {
             statusEl.textContent = "検索エラー: 該当する場所が見つかりませんでした";
           }
@@ -502,35 +506,45 @@
       });
     }
 
-    function initMap() {
-      if (mapInited) return;
-      mapInited = true;
+    function initMap(initialLat, initialLng, initialZoom) {
+      const lat = initialLat || parseFloat(inputLat.value) || 35.681236;
+      const lng = initialLng || parseFloat(inputLng.value) || 139.767125;
+      const zoom = initialZoom || 3;
 
-      const lat = parseFloat(inputLat.value) || 35.681236;
-      const lng = parseFloat(inputLng.value) || 139.767125;
+      if (!mapInited) {
+        mapInited = true;
+        gMap = new google.maps.Map(document.getElementById('map'), {
+          center: { lat, lng },
+          zoom: zoom,
+          streetViewControl: false,
+        });
 
-      gMap = new google.maps.Map(document.getElementById('map'), {
-        center: { lat, lng },
-        zoom: 3,
-        streetViewControl: false,
-      });
-
-      gMap.addListener('click', (e) => {
-        inputLat.value = e.latLng.lat();
-        inputLng.value = e.latLng.lng();
-        mapOverlay.style.display = 'none';
-        loadPanorama();
-      });
+        gMap.addListener('click', (e) => {
+          inputLat.value = e.latLng.lat();
+          inputLng.value = e.latLng.lng();
+          mapOverlay.style.display = 'none';
+          loadPanorama();
+        });
+      } else {
+        gMap.setCenter({ lat, lng });
+        gMap.setZoom(zoom);
+      }
     }
 
-    function openMap() {
+    function openMapWithLocation(lat, lng, zoom) {
       const apiKey = inputApiKey.value.trim();
       if (!apiKey) {
         alert('APIキーを入力してください');
         return;
       }
       mapOverlay.style.display = 'block';
-      loadGoogleMapsScript(apiKey, initMap);
+      loadGoogleMapsScript(apiKey, () => {
+        initMap(lat, lng, zoom);
+      });
+    }
+
+    function openMap() {
+      openMapWithLocation(null, null, 3);
     }
 
     function updateScreenOrientAngle() {
