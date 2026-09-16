@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
-  <title>Street View 360 VR (Dynamic Projection Fixed)</title>
+  <title>Street View 360 VR (Tile Distortion Fixed)</title>
   <style>
     body {
       margin: 0;
@@ -292,7 +292,6 @@
       }
     }
 
-    /* 球体メッシュとUVマッピングの設定 */
     function applyTextureToSphere(textureData, tilesInfo) {
       const texture = textureData.texture || textureData;
 
@@ -302,12 +301,10 @@
         sphereMesh.material.dispose();
       }
 
-      // 動的にGoogleから送られてきた解像度情報（worldSize）を元にUVクロップ率を算出
       let cropRatioX = 1.0;
       if (tilesInfo && tilesInfo.worldSize && tilesInfo.tileSize) {
         const worldWidth = tilesInfo.worldSize.width;
         const worldHeight = tilesInfo.worldSize.height;
-        // 本来のパノラマアスペクト比 2:1 に対する比率
         const expectedWidth = worldHeight * 2;
         if (worldWidth > 0 && expectedWidth > 0) {
           cropRatioX = Math.min(worldWidth / expectedWidth, 1.0);
@@ -316,7 +313,6 @@
         cropRatioX = textureData.validRatio;
       }
 
-      // 重複部分を除外するようにUVリピートを設定
       texture.repeat.set(cropRatioX, 1);
 
       const geometry = new THREE.SphereGeometry(1000, 60, 40);
@@ -334,6 +330,7 @@
       scene.add(sphereMesh);
     }
 
+    /* タイル取得・連結ロジック（欠損・ラッピング対応版） */
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -357,8 +354,6 @@
       canvas.height = gridHeight;
       const ctx = canvas.getContext('2d');
 
-      let maxTileX = 0;
-
       const promises = [];
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
@@ -368,10 +363,12 @@
             img.crossOrigin = "anonymous";
             img.onload = () => {
               ctx.drawImage(img, x * tileWidth, y * tileHeight);
-              if (x > maxTileX) maxTileX = x;
               resolve();
             };
-            img.onerror = () => resolve();
+            img.onerror = () => {
+              // 404等の欠損タイル発生時も落とさずスキップ
+              resolve();
+            };
             img.src = tileUrl;
           });
           promises.push(p);
@@ -383,17 +380,13 @@
       const texture = new THREE.CanvasTexture(canvas);
       texture.minFilter = THREE.LinearFilter;
       texture.magFilter = THREE.LinearFilter;
-      texture.wrapS = THREE.ClampToEdgeWrapping;
+      
+      // シーム（継ぎ目）で画像が引き伸ばされるのを防ぐため RepeatWrapping を使用
+      texture.wrapS = THREE.RepeatWrapping;
       texture.wrapT = THREE.ClampToEdgeWrapping;
 
-      const actualWidth = (maxTileX + 1) * tileWidth;
-      let validRatio = actualWidth / gridWidth;
-      if (validRatio > 0.85 && validRatio < 1.0) {
-        validRatio = (cols - 0.5) / cols;
-      }
-
       texture.needsUpdate = true;
-      return { texture, validRatio };
+      return { texture, validRatio: 1.0 };
     }
 
     function geocodeAddress() {
