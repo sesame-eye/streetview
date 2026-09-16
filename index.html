@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
-  <title>Street View 360 VR (Tile Distortion Fixed)</title>
+  <title>Street View 360 VR (Parallax Duplication Fixed)</title>
   <style>
     body {
       margin: 0;
@@ -128,7 +128,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
   <script>
-    let scene, cameraLeft, cameraRight, cameraRig, renderer, sphereMesh;
+    let scene, cameraLeft, cameraRight, cameraRig, renderer;
+    let sphereMeshLeft, sphereMeshRight;
     const eyeGap = 0.5;
 
     let statusEl, btnLoad, btnGyro, inputApiKey, chkSaveApiKey, inputSearch, btnSearch, inputLat, inputLng, inputZoom;
@@ -169,6 +170,10 @@
 
       cameraLeft.position.set(-eyeGap, 0, 0);
       cameraRight.position.set(eyeGap, 0, 0);
+
+      // レイヤー機能を使って左右のカメラがそれぞれ専用の球体を見るように指定
+      cameraLeft.layers.set(1);
+      cameraRight.layers.set(2);
 
       cameraRig.add(cameraLeft);
       cameraRig.add(cameraRight);
@@ -253,6 +258,12 @@
 
         hitMesh.userData = { ringMesh, panoLink: link };
 
+        // 矢印は両方のカメラに表示（レイヤー0）
+        ringMesh.layers.enable(1);
+        ringMesh.layers.enable(2);
+        hitMesh.layers.enable(1);
+        hitMesh.layers.enable(2);
+
         arrowGroup.add(ringMesh);
         arrowGroup.add(hitMesh);
         arrowHitBoxes.push(hitMesh);
@@ -292,28 +303,23 @@
       }
     }
 
+    /* 左右独立した球体メッシュを生成して配置 */
     function applyTextureToSphere(textureData, tilesInfo) {
       const texture = textureData.texture || textureData;
 
-      if (sphereMesh) {
-        scene.remove(sphereMesh);
-        sphereMesh.geometry.dispose();
-        sphereMesh.material.dispose();
+      if (sphereMeshLeft) {
+        scene.remove(sphereMeshLeft);
+        sphereMeshLeft.geometry.dispose();
+        sphereMeshLeft.material.dispose();
+      }
+      if (sphereMeshRight) {
+        scene.remove(sphereMeshRight);
+        sphereMeshRight.geometry.dispose();
+        sphereMeshRight.material.dispose();
       }
 
-      let cropRatioX = 1.0;
-      if (tilesInfo && tilesInfo.worldSize && tilesInfo.tileSize) {
-        const worldWidth = tilesInfo.worldSize.width;
-        const worldHeight = tilesInfo.worldSize.height;
-        const expectedWidth = worldHeight * 2;
-        if (worldWidth > 0 && expectedWidth > 0) {
-          cropRatioX = Math.min(worldWidth / expectedWidth, 1.0);
-        }
-      } else if (textureData.validRatio) {
-        cropRatioX = textureData.validRatio;
-      }
-
-      texture.repeat.set(cropRatioX, 1);
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
 
       const geometry = new THREE.SphereGeometry(1000, 60, 40);
       geometry.scale(-1, 1, 1);
@@ -323,14 +329,24 @@
         side: THREE.DoubleSide
       });
 
-      sphereMesh = new THREE.Mesh(geometry, material);
       const centerHeadingRad = THREE.MathUtils.degToRad(currentCenterHeading);
-      sphereMesh.rotation.y = -Math.PI / 2 - centerHeadingRad;
 
-      scene.add(sphereMesh);
+      // 左目用メッシュ (Layer 1)
+      sphereMeshLeft = new THREE.Mesh(geometry, material);
+      sphereMeshLeft.position.set(-eyeGap, 0, 0);
+      sphereMeshLeft.rotation.y = -Math.PI / 2 - centerHeadingRad;
+      sphereMeshLeft.layers.set(1);
+
+      // 右目用メッシュ (Layer 2)
+      sphereMeshRight = new THREE.Mesh(geometry, material.clone());
+      sphereMeshRight.position.set(eyeGap, 0, 0);
+      sphereMeshRight.rotation.y = -Math.PI / 2 - centerHeadingRad;
+      sphereMeshRight.layers.set(2);
+
+      scene.add(sphereMeshLeft);
+      scene.add(sphereMeshRight);
     }
 
-    /* タイル取得・連結ロジック（欠損・ラッピング対応版） */
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -365,10 +381,7 @@
               ctx.drawImage(img, x * tileWidth, y * tileHeight);
               resolve();
             };
-            img.onerror = () => {
-              // 404等の欠損タイル発生時も落とさずスキップ
-              resolve();
-            };
+            img.onerror = () => resolve();
             img.src = tileUrl;
           });
           promises.push(p);
@@ -380,13 +393,9 @@
       const texture = new THREE.CanvasTexture(canvas);
       texture.minFilter = THREE.LinearFilter;
       texture.magFilter = THREE.LinearFilter;
-      
-      // シーム（継ぎ目）で画像が引き伸ばされるのを防ぐため RepeatWrapping を使用
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-
       texture.needsUpdate = true;
-      return { texture, validRatio: 1.0 };
+
+      return { texture };
     }
 
     function geocodeAddress() {
