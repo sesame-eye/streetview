@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
-  <title>Street View 360 VR (Parallax Duplication Fixed)</title>
+  <title>Street View 360 VR (Crop & Layer Fixed)</title>
   <style>
     body {
       margin: 0;
@@ -171,7 +171,7 @@
       cameraLeft.position.set(-eyeGap, 0, 0);
       cameraRight.position.set(eyeGap, 0, 0);
 
-      // レイヤー機能を使って左右のカメラがそれぞれ専用の球体を見るように指定
+      // レイヤー分けによる左右カメラ独立描画
       cameraLeft.layers.set(1);
       cameraRight.layers.set(2);
 
@@ -258,7 +258,6 @@
 
         hitMesh.userData = { ringMesh, panoLink: link };
 
-        // 矢印は両方のカメラに表示（レイヤー0）
         ringMesh.layers.enable(1);
         ringMesh.layers.enable(2);
         hitMesh.layers.enable(1);
@@ -303,9 +302,9 @@
       }
     }
 
-    /* 左右独立した球体メッシュを生成して配置 */
+    /* 有効領域クロッピング処理を適用してテクスチャをマッピング */
     function applyTextureToSphere(textureData, tilesInfo) {
-      const texture = textureData.texture || textureData;
+      const texture = textureData.texture;
 
       if (sphereMeshLeft) {
         scene.remove(sphereMeshLeft);
@@ -318,7 +317,9 @@
         sphereMeshRight.material.dispose();
       }
 
-      texture.wrapS = THREE.RepeatWrapping;
+      // 欠損部分（黒い余白）を除外して100%に拡大
+      texture.repeat.set(textureData.validRatioX, textureData.validRatioY);
+      texture.wrapS = THREE.ClampToEdgeWrapping;
       texture.wrapT = THREE.ClampToEdgeWrapping;
 
       const geometry = new THREE.SphereGeometry(1000, 60, 40);
@@ -331,13 +332,13 @@
 
       const centerHeadingRad = THREE.MathUtils.degToRad(currentCenterHeading);
 
-      // 左目用メッシュ (Layer 1)
+      // 左目用メッシュ
       sphereMeshLeft = new THREE.Mesh(geometry, material);
       sphereMeshLeft.position.set(-eyeGap, 0, 0);
       sphereMeshLeft.rotation.y = -Math.PI / 2 - centerHeadingRad;
       sphereMeshLeft.layers.set(1);
 
-      // 右目用メッシュ (Layer 2)
+      // 右目用メッシュ
       sphereMeshRight = new THREE.Mesh(geometry, material.clone());
       sphereMeshRight.position.set(eyeGap, 0, 0);
       sphereMeshRight.rotation.y = -Math.PI / 2 - centerHeadingRad;
@@ -347,6 +348,7 @@
       scene.add(sphereMeshRight);
     }
 
+    /* 有効な画像の読み込み最大範囲（幅・高さ）を監視・計算 */
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -362,13 +364,13 @@
       const cols = Math.pow(2, zoom);
       const rows = Math.pow(2, Math.max(zoom - 1, 0));
 
-      const gridWidth = cols * tileWidth;
-      const gridHeight = rows * tileHeight;
-
       const canvas = document.createElement('canvas');
-      canvas.width = gridWidth;
-      canvas.height = gridHeight;
+      canvas.width = cols * tileWidth;
+      canvas.height = rows * tileHeight;
       const ctx = canvas.getContext('2d');
+
+      let maxLoadedX = 0;
+      let maxLoadedY = 0;
 
       const promises = [];
       for (let y = 0; y < rows; y++) {
@@ -379,6 +381,8 @@
             img.crossOrigin = "anonymous";
             img.onload = () => {
               ctx.drawImage(img, x * tileWidth, y * tileHeight);
+              if ((x + 1) * tileWidth > maxLoadedX) maxLoadedX = (x + 1) * tileWidth;
+              if ((y + 1) * tileHeight > maxLoadedY) maxLoadedY = (y + 1) * tileHeight;
               resolve();
             };
             img.onerror = () => resolve();
@@ -395,7 +399,10 @@
       texture.magFilter = THREE.LinearFilter;
       texture.needsUpdate = true;
 
-      return { texture };
+      const validRatioX = maxLoadedX > 0 ? (maxLoadedX / canvas.width) : 1.0;
+      const validRatioY = maxLoadedY > 0 ? (maxLoadedY / canvas.height) : 1.0;
+
+      return { texture, validRatioX, validRatioY };
     }
 
     function geocodeAddress() {
