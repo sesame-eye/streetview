@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
-  <title>Street View 360 VR (Fixed UV Crop)</title>
+  <title>Street View 360 VR (Dynamic Projection Fixed)</title>
   <style>
     body {
       margin: 0;
@@ -292,10 +292,9 @@
       }
     }
 
-    /* テクスチャのUV範囲制御による重複カット */
-    function applyTextureToSphere(textureData) {
+    /* 球体メッシュとUVマッピングの設定 */
+    function applyTextureToSphere(textureData, tilesInfo) {
       const texture = textureData.texture || textureData;
-      const validRatio = textureData.validRatio || 1.0;
 
       if (sphereMesh) {
         scene.remove(sphereMesh);
@@ -303,10 +302,23 @@
         sphereMesh.material.dispose();
       }
 
-      // UV座標を有効な領域（重複カット後）のみに制限
-      texture.repeat.set(validRatio, 1);
+      // 動的にGoogleから送られてきた解像度情報（worldSize）を元にUVクロップ率を算出
+      let cropRatioX = 1.0;
+      if (tilesInfo && tilesInfo.worldSize && tilesInfo.tileSize) {
+        const worldWidth = tilesInfo.worldSize.width;
+        const worldHeight = tilesInfo.worldSize.height;
+        // 本来のパノラマアスペクト比 2:1 に対する比率
+        const expectedWidth = worldHeight * 2;
+        if (worldWidth > 0 && expectedWidth > 0) {
+          cropRatioX = Math.min(worldWidth / expectedWidth, 1.0);
+        }
+      } else if (textureData.validRatio) {
+        cropRatioX = textureData.validRatio;
+      }
 
-      // 球体は完全に 360 度（2PI）で作成
+      // 重複部分を除外するようにUVリピートを設定
+      texture.repeat.set(cropRatioX, 1);
+
       const geometry = new THREE.SphereGeometry(1000, 60, 40);
       geometry.scale(-1, 1, 1);
 
@@ -322,7 +334,6 @@
       scene.add(sphereMesh);
     }
 
-    /* タイル取得および有効画像領域（のりしろ除外）の比率判定 */
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -360,7 +371,7 @@
               if (x > maxTileX) maxTileX = x;
               resolve();
             };
-            img.onerror = () => resolve(); // 読み込めないタイルは無視（＝余白）
+            img.onerror = () => resolve();
             img.src = tileUrl;
           });
           promises.push(p);
@@ -375,14 +386,9 @@
       texture.wrapS = THREE.ClampToEdgeWrapping;
       texture.wrapT = THREE.ClampToEdgeWrapping;
 
-      // 実際に画像が存在した最後のタイルの右端を取得
       const actualWidth = (maxTileX + 1) * tileWidth;
-      
-      // Zoom 2以上における Google Street View タイルの「実際の360度画角領域」の比率計算
-      // (Googleの2Dタイル描画で生じる右端ののりしろを除外する)
       let validRatio = actualWidth / gridWidth;
       if (validRatio > 0.85 && validRatio < 1.0) {
-        // Zoomレベルに応じた標準的な有効幅補正 (標準例: 7/8 や 13/16 等の有効タイル範囲)
         validRatio = (cols - 0.5) / cols;
       }
 
@@ -480,8 +486,10 @@
 
         ensureStreetViewService(apiKey, () => {
           svService.getPanorama({ pano: panoId }, (data, status) => {
+            let tilesInfo = null;
             if (status === 'OK') {
               currentLinks = data.links || [];
+              tilesInfo = data.tiles || null;
               currentCenterHeading = (data.tiles && typeof data.tiles.centerHeading === 'number')
                 ? data.tiles.centerHeading : 0;
             } else {
@@ -489,7 +497,7 @@
               currentCenterHeading = 0;
             }
 
-            applyTextureToSphere(textureData);
+            applyTextureToSphere(textureData, tilesInfo);
             build3DArrows();
 
             statusEl.textContent = isInitial ? "360度 VR準備完了！" : "移動完了";
