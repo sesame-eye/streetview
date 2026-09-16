@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
-  <title>Street View 360 VR (Crop & Layer Fixed)</title>
+  <title>Street View 360 VR (Static Version)</title>
   <style>
     body {
       margin: 0;
@@ -128,8 +128,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
   <script>
-    let scene, cameraLeft, cameraRight, cameraRig, renderer;
-    let sphereMeshLeft, sphereMeshRight;
+    let scene, cameraLeft, cameraRight, cameraRig, renderer, sphereMesh;
     const eyeGap = 0.5;
 
     let statusEl, btnLoad, btnGyro, inputApiKey, chkSaveApiKey, inputSearch, btnSearch, inputLat, inputLng, inputZoom;
@@ -171,10 +170,6 @@
       cameraLeft.position.set(-eyeGap, 0, 0);
       cameraRight.position.set(eyeGap, 0, 0);
 
-      // レイヤー分けによる左右カメラ独立描画
-      cameraLeft.layers.set(1);
-      cameraRight.layers.set(2);
-
       cameraRig.add(cameraLeft);
       cameraRig.add(cameraRight);
 
@@ -191,6 +186,8 @@
       scene.add(light);
 
       window.addEventListener('resize', onWindowResize);
+      
+      // VRゴーグル操作の感度改善：click から pointerdown に変更
       window.addEventListener('pointerdown', onTapScreen);
 
       animate();
@@ -258,11 +255,6 @@
 
         hitMesh.userData = { ringMesh, panoLink: link };
 
-        ringMesh.layers.enable(1);
-        ringMesh.layers.enable(2);
-        hitMesh.layers.enable(1);
-        hitMesh.layers.enable(2);
-
         arrowGroup.add(ringMesh);
         arrowGroup.add(hitMesh);
         arrowHitBoxes.push(hitMesh);
@@ -302,25 +294,12 @@
       }
     }
 
-    /* 有効領域クロッピング処理を適用してテクスチャをマッピング */
-    function applyTextureToSphere(textureData, tilesInfo) {
-      const texture = textureData.texture;
-
-      if (sphereMeshLeft) {
-        scene.remove(sphereMeshLeft);
-        sphereMeshLeft.geometry.dispose();
-        sphereMeshLeft.material.dispose();
+    function applyTextureToSphere(texture) {
+      if (sphereMesh) {
+        scene.remove(sphereMesh);
+        sphereMesh.geometry.dispose();
+        sphereMesh.material.dispose();
       }
-      if (sphereMeshRight) {
-        scene.remove(sphereMeshRight);
-        sphereMeshRight.geometry.dispose();
-        sphereMeshRight.material.dispose();
-      }
-
-      // 欠損部分（黒い余白）を除外して100%に拡大
-      texture.repeat.set(textureData.validRatioX, textureData.validRatioY);
-      texture.wrapS = THREE.ClampToEdgeWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
 
       const geometry = new THREE.SphereGeometry(1000, 60, 40);
       geometry.scale(-1, 1, 1);
@@ -330,25 +309,13 @@
         side: THREE.DoubleSide
       });
 
+      sphereMesh = new THREE.Mesh(geometry, material);
       const centerHeadingRad = THREE.MathUtils.degToRad(currentCenterHeading);
+      sphereMesh.rotation.y = -Math.PI / 2 - centerHeadingRad;
 
-      // 左目用メッシュ
-      sphereMeshLeft = new THREE.Mesh(geometry, material);
-      sphereMeshLeft.position.set(-eyeGap, 0, 0);
-      sphereMeshLeft.rotation.y = -Math.PI / 2 - centerHeadingRad;
-      sphereMeshLeft.layers.set(1);
-
-      // 右目用メッシュ
-      sphereMeshRight = new THREE.Mesh(geometry, material.clone());
-      sphereMeshRight.position.set(eyeGap, 0, 0);
-      sphereMeshRight.rotation.y = -Math.PI / 2 - centerHeadingRad;
-      sphereMeshRight.layers.set(2);
-
-      scene.add(sphereMeshLeft);
-      scene.add(sphereMeshRight);
+      scene.add(sphereMesh);
     }
 
-    /* 有効な画像の読み込み最大範囲（幅・高さ）を監視・計算 */
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -369,9 +336,6 @@
       canvas.height = rows * tileHeight;
       const ctx = canvas.getContext('2d');
 
-      let maxLoadedX = 0;
-      let maxLoadedY = 0;
-
       const promises = [];
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
@@ -381,8 +345,6 @@
             img.crossOrigin = "anonymous";
             img.onload = () => {
               ctx.drawImage(img, x * tileWidth, y * tileHeight);
-              if ((x + 1) * tileWidth > maxLoadedX) maxLoadedX = (x + 1) * tileWidth;
-              if ((y + 1) * tileHeight > maxLoadedY) maxLoadedY = (y + 1) * tileHeight;
               resolve();
             };
             img.onerror = () => resolve();
@@ -395,16 +357,11 @@
       await Promise.all(promises);
 
       const texture = new THREE.CanvasTexture(canvas);
-      texture.minFilter = THREE.LinearFilter;
-      texture.magFilter = THREE.LinearFilter;
       texture.needsUpdate = true;
-
-      const validRatioX = maxLoadedX > 0 ? (maxLoadedX / canvas.width) : 1.0;
-      const validRatioY = maxLoadedY > 0 ? (maxLoadedY / canvas.height) : 1.0;
-
-      return { texture, validRatioX, validRatioY };
+      return texture;
     }
 
+    // キーワード検索から拡大地図を表示する処理
     function geocodeAddress() {
       const apiKey = inputApiKey.value.trim();
       const query = inputSearch.value.trim();
@@ -430,6 +387,7 @@
             inputLng.value = loc.lng();
             statusEl.textContent = `「${results[0].formatted_address}」の地図を開きました。タップで場所を選択してください。`;
 
+            // 地図を開いて検索位置へジャンプ（ズームレベル18で拡大表示）
             openMapWithLocation(loc.lat(), loc.lng(), 18);
           } else {
             statusEl.textContent = "検索エラー: 該当する場所が見つかりませんでした";
@@ -491,14 +449,12 @@
       statusEl.textContent = isInitial ? "1. パノラマ画像を生成中..." : "移動中...";
 
       try {
-        const textureData = await fetchAndStitchTiles(panoId, zoom, apiKey);
+        const texture = await fetchAndStitchTiles(panoId, zoom, apiKey);
 
         ensureStreetViewService(apiKey, () => {
           svService.getPanorama({ pano: panoId }, (data, status) => {
-            let tilesInfo = null;
             if (status === 'OK') {
               currentLinks = data.links || [];
-              tilesInfo = data.tiles || null;
               currentCenterHeading = (data.tiles && typeof data.tiles.centerHeading === 'number')
                 ? data.tiles.centerHeading : 0;
             } else {
@@ -506,7 +462,7 @@
               currentCenterHeading = 0;
             }
 
-            applyTextureToSphere(textureData, tilesInfo);
+            applyTextureToSphere(texture);
             build3DArrows();
 
             statusEl.textContent = isInitial ? "360度 VR準備完了！" : "移動完了";
