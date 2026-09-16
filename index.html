@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
-  <title>Street View 360 VR (Static Version)</title>
+  <title>Street View 360 VR (Fixed Seamless Version)</title>
   <style>
     body {
       margin: 0;
@@ -186,8 +186,6 @@
       scene.add(light);
 
       window.addEventListener('resize', onWindowResize);
-      
-      // VRゴーグル操作の感度改善：click から pointerdown に変更
       window.addEventListener('pointerdown', onTapScreen);
 
       animate();
@@ -316,6 +314,7 @@
       scene.add(sphereMesh);
     }
 
+    /* 継ぎ目・切れ目対策を行ったタイル結合処理 */
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -331,10 +330,17 @@
       const cols = Math.pow(2, zoom);
       const rows = Math.pow(2, Math.max(zoom - 1, 0));
 
-      const canvas = document.createElement('canvas');
-      canvas.width = cols * tileWidth;
-      canvas.height = rows * tileHeight;
-      const ctx = canvas.getContext('2d');
+      const gridWidth = cols * tileWidth;
+      const gridHeight = rows * tileHeight;
+
+      // 1. タイル読み込み用の作業用Canvasを作成
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = gridWidth;
+      tempCanvas.height = gridHeight;
+      const tempCtx = tempCanvas.getContext('2d');
+
+      let maxX = 0;
+      let maxY = 0;
 
       const promises = [];
       for (let y = 0; y < rows; y++) {
@@ -344,7 +350,9 @@
             const img = new Image();
             img.crossOrigin = "anonymous";
             img.onload = () => {
-              ctx.drawImage(img, x * tileWidth, y * tileHeight);
+              tempCtx.drawImage(img, x * tileWidth, y * tileHeight);
+              if ((x + 1) * tileWidth > maxX) maxX = (x + 1) * tileWidth;
+              if ((y + 1) * tileHeight > maxY) maxY = (y + 1) * tileHeight;
               resolve();
             };
             img.onerror = () => resolve();
@@ -356,12 +364,29 @@
 
       await Promise.all(promises);
 
-      const texture = new THREE.CanvasTexture(canvas);
+      // 2. 実際に取得できた有効領域のサイズを計算
+      const validWidth = maxX > 0 ? maxX : gridWidth;
+      const validHeight = maxY > 0 ? maxY : gridHeight;
+
+      // 3. 正確な 2:1 (360度x180度) アスペクト比の標準Canvasへ拡大・転写（余白や欠損を防止）
+      const finalCanvas = document.createElement('canvas');
+      finalCanvas.width = gridWidth;
+      finalCanvas.height = gridHeight;
+      const finalCtx = finalCanvas.getContext('2d');
+
+      finalCtx.drawImage(
+        tempCanvas,
+        0, 0, validWidth, validHeight,  // 元画像の有効領域
+        0, 0, gridWidth, gridHeight    // 2:1アスペクト比に伸長して全周を補正
+      );
+
+      const texture = new THREE.CanvasTexture(finalCanvas);
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
       texture.needsUpdate = true;
       return texture;
     }
 
-    // キーワード検索から拡大地図を表示する処理
     function geocodeAddress() {
       const apiKey = inputApiKey.value.trim();
       const query = inputSearch.value.trim();
@@ -387,7 +412,6 @@
             inputLng.value = loc.lng();
             statusEl.textContent = `「${results[0].formatted_address}」の地図を開きました。タップで場所を選択してください。`;
 
-            // 地図を開いて検索位置へジャンプ（ズームレベル18で拡大表示）
             openMapWithLocation(loc.lat(), loc.lng(), 18);
           } else {
             statusEl.textContent = "検索エラー: 該当する場所が見つかりませんでした";
