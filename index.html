@@ -149,7 +149,6 @@
     let currentLinks = [];
     let currentCenterHeading = 0;
     let isMoving = false;
-    let svService = null;
     let geocoder = null;
     let googleMapsLoaded = false;
     let mapInited = false;
@@ -248,7 +247,7 @@
         ringMesh.position.set(Math.sin(rad) * distance, -4, -Math.cos(rad) * distance);
         ringMesh.rotation.x = -Math.PI / 2;
 
-        const hitGeo = new THREE.SphereGeometry(2.5, 16, 16);
+        const hitGeo = new THREE.SphereGeometry(3.2, 16, 16); // 照準を合わせやすいよう少し拡大
         const hitMat = new THREE.MeshBasicMaterial({ visible: false });
         const hitMesh = new THREE.Mesh(hitGeo, hitMat);
         hitMesh.position.copy(ringMesh.position);
@@ -358,10 +357,30 @@
       await Promise.all(workers);
     }
 
-    // panoData.tiles の規格情報(worldSize/tileSize)から、そのパノラマ固有の
-    // 実際のタイル縦横枚数を算出してタイルを取得・合成する。
-    // ズームレベルからの決め打ち計算はしない（古い/新しいパノラマの規格差を自動吸収するため）。
-    async function fetchAndStitchTiles(panoId, zoom, apiKey, worldSize, tileSize) {
+    // Street View Tile API の仕様(公式ドキュメントより):
+    //   - タイルのzoomは 0〜5 の固定範囲
+    //   - zoomが1上がるごとに視野角が半分になり、タイルの縦横枚数はほぼ2倍になる
+    //   - zoom=5 のときだけ、フルサイズ画像(imageWidth × imageHeight)を
+    //     tileWidth/tileHeightで割った枚数がそのままタイル格子になる
+    // これを利用し、Tile API自身のメタデータ(imageWidth/imageHeight)から、
+    // 要求するzoomでの正しいタイル格子を逆算する。
+    // 以前のバージョンは「古いJS版StreetViewServiceのworldSize」(=フルサイズ相当)を
+    // zoom換算せずそのまま使っていたため、低いzoomで存在しない座標を大量に
+    // リクエストしてしまい、ほとんどのタイルが失敗する原因になっていた。
+    const TILE_API_MAX_ZOOM = 5;
+
+    function computeTileGrid(zoom, imageWidth, imageHeight, tileWidth, tileHeight) {
+      const z = Math.min(Math.max(zoom, 0), TILE_API_MAX_ZOOM);
+      const scaleDown = Math.pow(2, TILE_API_MAX_ZOOM - z);
+      const cols = Math.max(1, Math.ceil(imageWidth / tileWidth / scaleDown));
+      const rows = Math.max(1, Math.ceil(imageHeight / tileHeight / scaleDown));
+      return { cols, rows, effectiveZoom: z };
+    }
+
+    // セッション作成 → Tile API自身のメタデータ取得(格子計算・links・heading用)
+    // → そのメタデータに基づいた正しい枚数だけタイルを取得、の順で行う。
+    // メタデータとタイル配信を同じTile APIに統一することで規格のズレを避ける。
+    async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -371,19 +390,18 @@
       const sessionData = await sessionRes.json();
       const sessionToken = sessionData.session;
 
-      const tileWidth = (tileSize && tileSize.width) || 512;
-      const tileHeight = (tileSize && tileSize.height) || 512;
+      const metaRes = await fetch(
+        `https://tile.googleapis.com/v1/streetview/metadata?session=${sessionToken}&key=${apiKey}&panoId=${encodeURIComponent(panoId)}`
+      );
+      if (!metaRes.ok) throw new Error("パノラマのメタデータ取得に失敗しました");
+      const meta = await metaRes.json();
 
-      let cols, rows;
-      if (worldSize && worldSize.width && worldSize.height) {
-        // このパノラマ固有の実サイズから、実際に存在するタイル枚数を計算する
-        cols = Math.max(1, Math.ceil(worldSize.width / tileWidth));
-        rows = Math.max(1, Math.ceil(worldSize.height / tileHeight));
-      } else {
-        // worldSizeが取得できなかった場合のみ、フォールバックとして従来の決め打ち計算を使う
-        cols = Math.pow(2, zoom);
-        rows = Math.pow(2, Math.max(zoom - 1, 0));
-      }
+      const tileWidth = meta.tileWidth || 512;
+      const tileHeight = meta.tileHeight || 512;
+      const imageWidth = meta.imageWidth || tileWidth;
+      const imageHeight = meta.imageHeight || tileHeight;
+
+      const { cols, rows, effectiveZoom } = computeTileGrid(zoom, imageWidth, imageHeight, tileWidth, tileHeight);
 
       const canvas = document.createElement('canvas');
       canvas.width = cols * tileWidth;
@@ -394,7 +412,7 @@
       const tasks = [];
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
-          const tileUrl = `https://tile.googleapis.com/v1/streetview/tiles/${zoom}/${x}/${y}?session=${sessionToken}&panoId=${panoId}&key=${apiKey}`;
+          const tileUrl = `https://tile.googleapis.com/v1/streetview/tiles/${effectiveZoom}/${x}/${y}?session=${sessionToken}&panoId=${panoId}&key=${apiKey}`;
           const tx = x, ty = y;
           tasks.push(async () => {
             const img = await fetchTileImage(tileUrl, 3);
@@ -412,7 +430,16 @@
 
       const texture = new THREE.CanvasTexture(canvas);
       texture.needsUpdate = true;
-      return { texture, failedCount, totalCount: cols * rows, cols, rows };
+
+      // links / centerHeading相当もTile API自身のメタデータから取得する
+      // （古いJS版StreetViewServiceには依存しない）
+      const links = (meta.links || []).map(l => ({ pano: l.panoId, heading: l.heading }));
+      const centerHeading = typeof meta.heading === 'number' ? meta.heading : 0;
+
+      return {
+        texture, failedCount, totalCount: cols * rows, cols, rows,
+        effectiveZoom, links, centerHeading
+      };
     }
 
     // キーワード検索から拡大地図を表示する処理
@@ -500,46 +527,26 @@
       const apiKey = inputApiKey.value.trim();
       const zoom = parseInt(inputZoom.value.trim()) || 2;
 
-      statusEl.textContent = isInitial ? "1. パノラマ情報(規格)を取得中..." : "移動中...";
+      statusEl.textContent = isInitial ? "1. パノラマ画像を生成中..." : "移動中...";
 
       try {
-        // 先にメタデータ(links, centerHeading, tiles.worldSize/tileSize)を取得する。
-        // これにより、このパノラマ固有のタイル規格を先に把握してから
-        // タイル取得を行えるようになり、規格差による欠落・重複を防げる。
-        const panoData = await new Promise((resolve, reject) => {
-          ensureStreetViewService(apiKey, () => {
-            svService.getPanorama({ pano: panoId }, (data, status) => {
-              if (status === 'OK') {
-                resolve(data);
-              } else {
-                reject(new Error("パノラマ情報の取得に失敗しました (status: " + status + ")"));
-              }
-            });
-          });
-        });
+        const { texture, failedCount, totalCount, effectiveZoom, links, centerHeading } =
+          await fetchAndStitchTiles(panoId, zoom, apiKey);
 
-        currentLinks = panoData.links || [];
-        currentCenterHeading = (panoData.tiles && typeof panoData.tiles.centerHeading === 'number')
-          ? panoData.tiles.centerHeading : 0;
-
-        const worldSize = panoData.tiles && panoData.tiles.worldSize; // このパノラマ固有の実サイズ
-        const tileSize = panoData.tiles && panoData.tiles.tileSize;
-
-        statusEl.textContent = isInitial ? "2. パノラマ画像を生成中..." : "移動中...(画像取得)";
-
-        const { texture, failedCount, totalCount } =
-          await fetchAndStitchTiles(panoId, zoom, apiKey, worldSize, tileSize);
+        currentLinks = links || [];
+        currentCenterHeading = centerHeading || 0;
 
         applyTextureToSphere(texture);
         build3DArrows();
 
-        if (failedCount > 0) {
-          statusEl.textContent =
-            (isInitial ? "360度 VR準備完了" : "移動完了") +
-            `（一部タイル取得失敗: ${failedCount}/${totalCount}枚）`;
-        } else {
-          statusEl.textContent = isInitial ? "360度 VR準備完了！" : "移動完了";
+        let msg = isInitial ? "360度 VR準備完了！" : "移動完了";
+        if (effectiveZoom !== zoom) {
+          msg += `（zoom=${zoom}非対応のためzoom=${effectiveZoom}を使用）`;
         }
+        if (failedCount > 0) {
+          msg += `（一部タイル取得失敗: ${failedCount}/${totalCount}枚）`;
+        }
+        statusEl.textContent = msg;
 
         if (isInitial) {
           btnGyro.style.display = "block";
@@ -570,13 +577,6 @@
         statusEl.textContent = 'Google Maps JS SDK の読み込みに失敗しました';
       };
       document.head.appendChild(script);
-    }
-
-    function ensureStreetViewService(apiKey, callback) {
-      loadGoogleMapsScript(apiKey, () => {
-        if (!svService) svService = new google.maps.StreetViewService();
-        callback();
-      });
     }
 
     function initMap(initialLat, initialLng, initialZoom) {
