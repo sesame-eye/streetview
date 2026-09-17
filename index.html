@@ -186,7 +186,7 @@
       scene.add(light);
 
       window.addEventListener('resize', onWindowResize);
-      
+
       // VRゴーグル操作の感度改善：click から pointerdown に変更
       window.addEventListener('pointerdown', onTapScreen);
 
@@ -316,7 +316,52 @@
       scene.add(sphereMesh);
     }
 
-    async function fetchAndStitchTiles(panoId, zoom, apiKey) {
+    // ============================================================
+    // タイル取得まわり
+    // ============================================================
+
+    // 1枚のタイル画像をリトライ付きで取得する
+    function fetchTileImage(url, retries) {
+      retries = retries || 3;
+      return new Promise((resolveOuter) => {
+        let attempt = 0;
+        function tryLoad() {
+          attempt++;
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => resolveOuter(img);
+          img.onerror = () => {
+            if (attempt < retries) {
+              setTimeout(tryLoad, 300 * attempt); // 少し待って再試行
+            } else {
+              resolveOuter(null); // 最終的に失敗
+            }
+          };
+          img.src = url;
+        }
+        tryLoad();
+      });
+    }
+
+    // 同時実行数を制限しながらタスク群を実行する簡易ワーカープール
+    async function runWithConcurrency(tasks, limit) {
+      let idx = 0;
+      async function worker() {
+        while (idx < tasks.length) {
+          const cur = idx++;
+          await tasks[cur]();
+        }
+      }
+      const workerCount = Math.max(1, Math.min(limit, tasks.length));
+      const workers = [];
+      for (let i = 0; i < workerCount; i++) workers.push(worker());
+      await Promise.all(workers);
+    }
+
+    // panoData.tiles の規格情報(worldSize/tileSize)から、そのパノラマ固有の
+    // 実際のタイル縦横枚数を算出してタイルを取得・合成する。
+    // ズームレベルからの決め打ち計算はしない（古い/新しいパノラマの規格差を自動吸収するため）。
+    async function fetchAndStitchTiles(panoId, zoom, apiKey, worldSize, tileSize) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -326,39 +371,48 @@
       const sessionData = await sessionRes.json();
       const sessionToken = sessionData.session;
 
-      const tileWidth = 512;
-      const tileHeight = 512;
-      const cols = Math.pow(2, zoom);
-      const rows = Math.pow(2, Math.max(zoom - 1, 0));
+      const tileWidth = (tileSize && tileSize.width) || 512;
+      const tileHeight = (tileSize && tileSize.height) || 512;
+
+      let cols, rows;
+      if (worldSize && worldSize.width && worldSize.height) {
+        // このパノラマ固有の実サイズから、実際に存在するタイル枚数を計算する
+        cols = Math.max(1, Math.ceil(worldSize.width / tileWidth));
+        rows = Math.max(1, Math.ceil(worldSize.height / tileHeight));
+      } else {
+        // worldSizeが取得できなかった場合のみ、フォールバックとして従来の決め打ち計算を使う
+        cols = Math.pow(2, zoom);
+        rows = Math.pow(2, Math.max(zoom - 1, 0));
+      }
 
       const canvas = document.createElement('canvas');
       canvas.width = cols * tileWidth;
       canvas.height = rows * tileHeight;
       const ctx = canvas.getContext('2d');
 
-      const promises = [];
+      let failedCount = 0;
+      const tasks = [];
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
           const tileUrl = `https://tile.googleapis.com/v1/streetview/tiles/${zoom}/${x}/${y}?session=${sessionToken}&panoId=${panoId}&key=${apiKey}`;
-          const p = new Promise((resolve) => {
-            const img = new Image();
-            img.crossOrigin = "anonymous";
-            img.onload = () => {
-              ctx.drawImage(img, x * tileWidth, y * tileHeight);
-              resolve();
-            };
-            img.onerror = () => resolve();
-            img.src = tileUrl;
+          const tx = x, ty = y;
+          tasks.push(async () => {
+            const img = await fetchTileImage(tileUrl, 3);
+            if (img) {
+              ctx.drawImage(img, tx * tileWidth, ty * tileHeight);
+            } else {
+              failedCount++;
+            }
           });
-          promises.push(p);
         }
       }
 
-      await Promise.all(promises);
+      // 一斉リクエストではなく、同時実行数を制限して負荷・タイムアウトを避ける
+      await runWithConcurrency(tasks, 6);
 
       const texture = new THREE.CanvasTexture(canvas);
       texture.needsUpdate = true;
-      return texture;
+      return { texture, failedCount, totalCount: cols * rows, cols, rows };
     }
 
     // キーワード検索から拡大地図を表示する処理
@@ -446,37 +500,56 @@
       const apiKey = inputApiKey.value.trim();
       const zoom = parseInt(inputZoom.value.trim()) || 2;
 
-      statusEl.textContent = isInitial ? "1. パノラマ画像を生成中..." : "移動中...";
+      statusEl.textContent = isInitial ? "1. パノラマ情報(規格)を取得中..." : "移動中...";
 
       try {
-        const texture = await fetchAndStitchTiles(panoId, zoom, apiKey);
-
-        ensureStreetViewService(apiKey, () => {
-          svService.getPanorama({ pano: panoId }, (data, status) => {
-            if (status === 'OK') {
-              currentLinks = data.links || [];
-              currentCenterHeading = (data.tiles && typeof data.tiles.centerHeading === 'number')
-                ? data.tiles.centerHeading : 0;
-            } else {
-              currentLinks = [];
-              currentCenterHeading = 0;
-            }
-
-            applyTextureToSphere(texture);
-            build3DArrows();
-
-            statusEl.textContent = isInitial ? "360度 VR準備完了！" : "移動完了";
-            if (isInitial) {
-              btnGyro.style.display = "block";
-              btnLoad.disabled = false;
-            } else {
-              isMoving = false;
-            }
+        // 先にメタデータ(links, centerHeading, tiles.worldSize/tileSize)を取得する。
+        // これにより、このパノラマ固有のタイル規格を先に把握してから
+        // タイル取得を行えるようになり、規格差による欠落・重複を防げる。
+        const panoData = await new Promise((resolve, reject) => {
+          ensureStreetViewService(apiKey, () => {
+            svService.getPanorama({ pano: panoId }, (data, status) => {
+              if (status === 'OK') {
+                resolve(data);
+              } else {
+                reject(new Error("パノラマ情報の取得に失敗しました (status: " + status + ")"));
+              }
+            });
           });
         });
+
+        currentLinks = panoData.links || [];
+        currentCenterHeading = (panoData.tiles && typeof panoData.tiles.centerHeading === 'number')
+          ? panoData.tiles.centerHeading : 0;
+
+        const worldSize = panoData.tiles && panoData.tiles.worldSize; // このパノラマ固有の実サイズ
+        const tileSize = panoData.tiles && panoData.tiles.tileSize;
+
+        statusEl.textContent = isInitial ? "2. パノラマ画像を生成中..." : "移動中...(画像取得)";
+
+        const { texture, failedCount, totalCount } =
+          await fetchAndStitchTiles(panoId, zoom, apiKey, worldSize, tileSize);
+
+        applyTextureToSphere(texture);
+        build3DArrows();
+
+        if (failedCount > 0) {
+          statusEl.textContent =
+            (isInitial ? "360度 VR準備完了" : "移動完了") +
+            `（一部タイル取得失敗: ${failedCount}/${totalCount}枚）`;
+        } else {
+          statusEl.textContent = isInitial ? "360度 VR準備完了！" : "移動完了";
+        }
+
+        if (isInitial) {
+          btnGyro.style.display = "block";
+          btnLoad.disabled = false;
+        } else {
+          isMoving = false;
+        }
       } catch (err) {
         console.error(err);
-        statusEl.textContent = "画像の取得に失敗しました: " + err.message;
+        statusEl.textContent = "エラー: " + err.message;
         if (isInitial) btnLoad.disabled = false;
         else isMoving = false;
       }
