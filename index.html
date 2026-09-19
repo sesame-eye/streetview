@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="Street View 3D VR">
-  <title>Street View 3D VR (Depth Mesh Version)</title>
+  <meta name="apple-mobile-web-app-title" content="Street View VR">
+  <title>Street View 360 VR (Static Version)</title>
   <style>
     body {
       margin: 0;
@@ -45,15 +45,32 @@
       box-sizing: border-box; font-size: 0.9rem;
     }
     .checkbox-label {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 0.8rem; color: #aaa; margin-top: 6px; cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      color: #aaa;
+      margin-top: 6px;
+      cursor: pointer;
     }
-    .checkbox-label input { width: auto; margin: 0; }
-    .search-box { display: flex; gap: 6px; margin-top: 4px; }
-    .search-box input { flex: 1; }
+    .checkbox-label input {
+      width: auto;
+      margin: 0;
+    }
+    .search-box {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .search-box input {
+      flex: 1;
+    }
     .search-box button {
-      width: auto; padding: 0 14px; margin-top: 0;
-      background: #28a745; white-space: nowrap;
+      width: auto;
+      padding: 0 14px;
+      margin-top: 0;
+      background: #28a745;
+      white-space: nowrap;
     }
     button {
       width: 100%; padding: 12px; margin-top: 10px;
@@ -107,97 +124,12 @@
     }
   </style>
 
-  <!-- Three.js & pako.js (zlib展開用) -->
+  <!-- Three.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
 
   <script>
-    // ------------------------------------------------------------
-    // Google Street View 深度データ (Depth Map) パーサー
-    // ------------------------------------------------------------
-    function parseGoogleStreetViewDepth(base64String) {
-      if (!base64String) return null;
-
-      // URL Safe Base64 デコード
-      let rawStr = base64String.replace(/-/g, '+').replace(/_/g, '/');
-      while (rawStr.length % 4) rawStr += '=';
-      const binaryStr = atob(rawStr);
-      const bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) {
-        bytes[i] = binaryStr.charCodeAt(i);
-      }
-
-      // zlib 伸張
-      let decompressed;
-      try {
-        decompressed = pako.inflate(bytes);
-      } catch (e) {
-        console.error("Depth map decompress failed", e);
-        return null;
-      }
-
-      const dataview = new DataView(decompressed.buffer);
-      const headerSize = dataview.getUint8(0);
-      const numPlanes = dataview.getUint16(1, true);
-      const width = dataview.getUint16(3, true);
-      const height = dataview.getUint16(5, true);
-      const offset = dataview.getUint16(7, true);
-
-      if (headerSize !== 8) return null;
-
-      const planes = [];
-      for (let i = 0; i < numPlanes; i++) {
-        const pOffset = offset + i * 16;
-        const nx = dataview.getFloat32(pOffset, true);
-        const ny = dataview.getFloat32(pOffset + 4, true);
-        const nz = dataview.getFloat32(pOffset + 8, true);
-        const d  = dataview.getFloat32(pOffset + 12, true);
-        planes.push({ n: new THREE.Vector3(nx, ny, nz), d: d });
-      }
-
-      const indicesOffset = offset + numPlanes * 16;
-      const indices = new Uint8Array(decompressed.buffer, indicesOffset, width * height);
-
-      // 各ピクセルの距離（メートル）配列を計算
-      const depthMap = new Float32Array(width * height);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const idx = y * width + x;
-          const planeIdx = indices[idx];
-
-          const theta = (x / (width - 1)) * Math.PI * 2 - Math.PI;
-          const phi = (y / (height - 1)) * Math.PI - Math.PI / 2;
-
-          const ray = new THREE.Vector3(
-            Math.sin(theta) * Math.cos(phi),
-            Math.sin(phi),
-            -Math.cos(theta) * Math.cos(phi)
-          );
-
-          if (planeIdx < planes.length) {
-            const p = planes[planeIdx];
-            const denom = ray.dot(p.n);
-            if (Math.abs(denom) > 1e-4) {
-              let dist = -p.d / denom;
-              if (dist <= 0 || isNaN(dist)) dist = 100.0;
-              depthMap[idx] = Math.min(dist, 100.0); // 最大100mにクランプ
-            } else {
-              depthMap[idx] = 100.0;
-            }
-          } else {
-            depthMap[idx] = 100.0; // 空や極遠景
-          }
-        }
-      }
-
-      return { width, height, depthMap };
-    }
-
-    // ------------------------------------------------------------
-    // メイン アプリケーション ロジック
-    // ------------------------------------------------------------
     let scene, cameraLeft, cameraRight, cameraRig, renderer, sphereMesh;
-    const eyeGap = 0.2;
+    const eyeGap = 0.5;
 
     let statusEl, btnLoad, btnGyro, inputApiKey, chkSaveApiKey, inputSearch, btnSearch, inputLat, inputLng, inputZoom;
     let uiPanel, btnToggleUi, btnMap, mapOverlay, mapCloseBtn;
@@ -253,6 +185,8 @@
       scene.add(light);
 
       window.addEventListener('resize', onWindowResize);
+
+      // VRゴーグル操作の感度改善：click から pointerdown に変更
       window.addEventListener('pointerdown', onTapScreen);
 
       animate();
@@ -310,10 +244,10 @@
         });
 
         const ringMesh = new THREE.Mesh(geometry, material);
-        ringMesh.position.set(Math.sin(rad) * distance, -3, -Math.cos(rad) * distance);
+        ringMesh.position.set(Math.sin(rad) * distance, -4, -Math.cos(rad) * distance);
         ringMesh.rotation.x = -Math.PI / 2;
 
-        const hitGeo = new THREE.SphereGeometry(3.2, 16, 16);
+        const hitGeo = new THREE.SphereGeometry(3.2, 16, 16); // 照準を合わせやすいよう少し拡大
         const hitMat = new THREE.MeshBasicMaterial({ visible: false });
         const hitMesh = new THREE.Mesh(hitGeo, hitMat);
         hitMesh.position.copy(ringMesh.position);
@@ -359,48 +293,15 @@
       }
     }
 
-    // ------------------------------------------------------------
-    // 3Dメッシュ生成＆深層データ（Depth Map）反映
-    // ------------------------------------------------------------
-    function applyTextureAndDepthToSphere(texture, depthDataParsed) {
+    function applyTextureToSphere(texture) {
       if (sphereMesh) {
         scene.remove(sphereMesh);
         sphereMesh.geometry.dispose();
         sphereMesh.material.dispose();
       }
 
-      const geometry = new THREE.SphereGeometry(1, 128, 64);
+      const geometry = new THREE.SphereGeometry(1000, 60, 40);
       geometry.scale(-1, 1, 1);
-
-      const posAttr = geometry.attributes.position;
-      const uvAttr = geometry.attributes.uv;
-
-      if (depthDataParsed) {
-        const { width, height, depthMap } = depthDataParsed;
-
-        for (let i = 0; i < posAttr.count; i++) {
-          const u = uvAttr.getX(i);
-          const v = uvAttr.getY(i);
-
-          const x = Math.min(Math.floor(u * width), width - 1);
-          const y = Math.min(Math.floor((1.0 - v) * height), height - 1);
-          const depthIndex = y * width + x;
-
-          let dist = depthMap[depthIndex];
-          if (!dist || dist < 1.0) dist = 100.0;
-
-          const vx = posAttr.getX(i);
-          const vy = posAttr.getY(i);
-          const vz = posAttr.getZ(i);
-
-          const vec = new THREE.Vector3(vx, vy, vz).normalize().multiplyScalar(dist);
-          posAttr.setXYZ(i, vec.x, vec.y, vec.z);
-        }
-        posAttr.needsUpdate = true;
-        geometry.computeVertexNormals();
-      } else {
-        geometry.scale(100, 100, 100);
-      }
 
       const material = new THREE.MeshBasicMaterial({
         map: texture,
@@ -414,9 +315,11 @@
       scene.add(sphereMesh);
     }
 
-    // ------------------------------------------------------------
-    // タイル取得＆メタデータ（Depth map含む）通信
-    // ------------------------------------------------------------
+    // ============================================================
+    // タイル取得まわり
+    // ============================================================
+
+    // 1枚のタイル画像をリトライ付きで取得する
     function fetchTileImage(url, retries) {
       retries = retries || 3;
       return new Promise((resolveOuter) => {
@@ -427,8 +330,11 @@
           img.crossOrigin = "anonymous";
           img.onload = () => resolveOuter(img);
           img.onerror = () => {
-            if (attempt < retries) setTimeout(tryLoad, 300 * attempt);
-            else resolveOuter(null);
+            if (attempt < retries) {
+              setTimeout(tryLoad, 300 * attempt); // 少し待って再試行
+            } else {
+              resolveOuter(null); // 最終的に失敗
+            }
           };
           img.src = url;
         }
@@ -436,6 +342,7 @@
       });
     }
 
+    // 同時実行数を制限しながらタスク群を実行する簡易ワーカープール
     async function runWithConcurrency(tasks, limit) {
       let idx = 0;
       async function worker() {
@@ -450,7 +357,18 @@
       await Promise.all(workers);
     }
 
+    // Street View Tile API の仕様(公式ドキュメントより):
+    //   - タイルのzoomは 0〜5 の固定範囲
+    //   - zoomが1上がるごとに視野角が半分になり、タイルの縦横枚数はほぼ2倍になる
+    //   - zoom=5 のときだけ、フルサイズ画像(imageWidth × imageHeight)を
+    //     tileWidth/tileHeightで割った枚数がそのままタイル格子になる
+    // これを利用し、Tile API自身のメタデータ(imageWidth/imageHeight)から、
+    // 要求するzoomでの正しいタイル格子を逆算する。
+    // 以前のバージョンは「古いJS版StreetViewServiceのworldSize」(=フルサイズ相当)を
+    // zoom換算せずそのまま使っていたため、低いzoomで存在しない座標を大量に
+    // リクエストしてしまい、ほとんどのタイルが失敗する原因になっていた。
     const TILE_API_MAX_ZOOM = 5;
+
     function computeTileGrid(zoom, imageWidth, imageHeight, tileWidth, tileHeight) {
       const z = Math.min(Math.max(zoom, 0), TILE_API_MAX_ZOOM);
       const scaleDown = Math.pow(2, TILE_API_MAX_ZOOM - z);
@@ -459,6 +377,9 @@
       return { cols, rows, effectiveZoom: z };
     }
 
+    // セッション作成 → Tile API自身のメタデータ取得(格子計算・links・heading用)
+    // → そのメタデータに基づいた正しい枚数だけタイルを取得、の順で行う。
+    // メタデータとタイル配信を同じTile APIに統一することで規格のズレを避ける。
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -474,22 +395,6 @@
       );
       if (!metaRes.ok) throw new Error("パノラマのメタデータ取得に失敗しました");
       const meta = await metaRes.json();
-
-      // ============================================================
-      // 深度データ (depth_map) キー名の揺らぎ全対応
-      // ============================================================
-      let parsedDepth = null;
-      let rawDepthData = null;
-
-      if (meta.depth_map) {
-        rawDepthData = typeof meta.depth_map === 'string' ? meta.depth_map : meta.depth_map.base64;
-      } else if (meta.depthMap) {
-        rawDepthData = typeof meta.depthMap === 'string' ? meta.depthMap : meta.depthMap.base64;
-      }
-
-      if (rawDepthData) {
-        parsedDepth = parseGoogleStreetViewDepth(rawDepthData);
-      }
 
       const tileWidth = meta.tileWidth || 512;
       const tileHeight = meta.tileHeight || 512;
@@ -520,26 +425,36 @@
         }
       }
 
+      // 一斉リクエストではなく、同時実行数を制限して負荷・タイムアウトを避ける
       await runWithConcurrency(tasks, 6);
 
       const texture = new THREE.CanvasTexture(canvas);
       texture.needsUpdate = true;
 
+      // links / centerHeading相当もTile API自身のメタデータから取得する
+      // （古いJS版StreetViewServiceには依存しない）
       const links = (meta.links || []).map(l => ({ pano: l.panoId, heading: l.heading }));
       const centerHeading = typeof meta.heading === 'number' ? meta.heading : 0;
 
       return {
-        texture, parsedDepth, failedCount, totalCount: cols * rows, cols, rows,
+        texture, failedCount, totalCount: cols * rows, cols, rows,
         effectiveZoom, links, centerHeading
       };
     }
 
+    // キーワード検索から拡大地図を表示する処理
     function geocodeAddress() {
       const apiKey = inputApiKey.value.trim();
       const query = inputSearch.value.trim();
 
-      if (!apiKey) { alert("APIキーを入力してください"); return; }
-      if (!query) { alert("検索したいキーワードを入力してください"); return; }
+      if (!apiKey) {
+        alert("APIキーを入力してください");
+        return;
+      }
+      if (!query) {
+        alert("検索したいキーワードを入力してください");
+        return;
+      }
 
       statusEl.textContent = "キーワードを検索中...";
 
@@ -552,6 +467,8 @@
             inputLat.value = loc.lat();
             inputLng.value = loc.lng();
             statusEl.textContent = `「${results[0].formatted_address}」の地図を開きました。タップで場所を選択してください。`;
+
+            // 地図を開いて検索位置へジャンプ（ズームレベル18で拡大表示）
             openMapWithLocation(loc.lat(), loc.lng(), 18);
           } else {
             statusEl.textContent = "検索エラー: 該当する場所が見つかりませんでした";
@@ -565,7 +482,10 @@
       const lat = inputLat.value.trim();
       const lng = inputLng.value.trim();
 
-      if (!apiKey) { alert("APIキーを入力してください"); return; }
+      if (!apiKey) {
+        alert("APIキーを入力してください");
+        return;
+      }
 
       if (chkSaveApiKey.checked) {
         localStorage.setItem('sv_vr_api_key', apiKey);
@@ -607,25 +527,25 @@
       const apiKey = inputApiKey.value.trim();
       const zoom = parseInt(inputZoom.value.trim()) || 2;
 
-      statusEl.textContent = isInitial ? "1. 深層3Dメッシュ＆画像を構築中..." : "移動中...";
+      statusEl.textContent = isInitial ? "1. パノラマ画像を生成中..." : "移動中...";
 
       try {
-        const { texture, parsedDepth, failedCount, totalCount, effectiveZoom, links, centerHeading } =
+        const { texture, failedCount, totalCount, effectiveZoom, links, centerHeading } =
           await fetchAndStitchTiles(panoId, zoom, apiKey);
 
         currentLinks = links || [];
         currentCenterHeading = centerHeading || 0;
 
-        applyTextureAndDepthToSphere(texture, parsedDepth);
+        applyTextureToSphere(texture);
         build3DArrows();
 
-        let msg = isInitial ? "3D立体 VR準備完了！" : "移動完了";
-        if (parsedDepth) {
-          msg += "（深層3D立体化適用済み）";
-        } else {
-          msg += "（※この地点は3D深層データ非対応のため平面表示です）";
+        let msg = isInitial ? "360度 VR準備完了！" : "移動完了";
+        if (effectiveZoom !== zoom) {
+          msg += `（zoom=${zoom}非対応のためzoom=${effectiveZoom}を使用）`;
         }
-
+        if (failedCount > 0) {
+          msg += `（一部タイル取得失敗: ${failedCount}/${totalCount}枚）`;
+        }
         statusEl.textContent = msg;
 
         if (isInitial) {
@@ -797,7 +717,7 @@
       mapCloseBtn.addEventListener('click', () => { mapOverlay.style.display = 'none'; });
 
       initThree();
-      statusEl.textContent = savedApiKey ? "保存されたキーを読み込みました。「3D VR生成」を押してください" : "APIキーを入力して「3D VR生成」を押してください";
+      statusEl.textContent = savedApiKey ? "保存されたキーを読み込みました。「360 VR生成」を押してください" : "APIキーを入力して「360 VR生成」を押してください";
     });
   </script>
 </head>
@@ -807,7 +727,7 @@
   <button id="btn-map" class="round-btn" title="世界地図から選ぶ">🌍</button>
 
   <div class="ui-panel" id="ui-panel">
-    <h3>Street View 3D VR</h3>
+    <h3>Street View 360 VR</h3>
 
     <label for="input-apikey">Google Maps API Key</label>
     <input id="input-apikey" type="password" placeholder="AIzaSy..." />
@@ -818,7 +738,7 @@
 
     <label for="input-search">キーワード検索 (地名・施設名)</label>
     <div class="search-box">
-      <input id="input-search" type="text" placeholder="例: サグラダファミリア, エッフェル塔" />
+      <input id="input-search" type="text" placeholder="例: エッフェル塔, サグラダファミリア" />
       <button id="btn-search">検索</button>
     </div>
 
@@ -831,7 +751,7 @@
     <label for="input-zoom">zoom (0〜3程度推奨)</label>
     <input id="input-zoom" type="text" value="2" />
 
-    <button id="btn-load">1. 3D VR生成</button>
+    <button id="btn-load">1. 360 VR生成</button>
     <button id="btn-gyro" style="display:none;">2. ジャイロ操作を有効化</button>
     <div id="status">初期化中...</div>
   </div>
