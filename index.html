@@ -153,6 +153,7 @@
     let googleMapsLoaded = false;
     let mapInited = false;
     let gMap = null;
+    let streetViewLayer = null; // ストリートビューカバーレイヤー用の変数
 
     function initThree() {
       const container = document.getElementById('canvas-container');
@@ -319,7 +320,6 @@
     // タイル取得まわり
     // ============================================================
 
-    // 1枚のタイル画像をリトライ付きで取得する
     function fetchTileImage(url, retries) {
       retries = retries || 3;
       return new Promise((resolveOuter) => {
@@ -331,9 +331,9 @@
           img.onload = () => resolveOuter(img);
           img.onerror = () => {
             if (attempt < retries) {
-              setTimeout(tryLoad, 300 * attempt); // 少し待って再試行
+              setTimeout(tryLoad, 300 * attempt);
             } else {
-              resolveOuter(null); // 最終的に失敗
+              resolveOuter(null);
             }
           };
           img.src = url;
@@ -342,7 +342,6 @@
       });
     }
 
-    // 同時実行数を制限しながらタスク群を実行する簡易ワーカープール
     async function runWithConcurrency(tasks, limit) {
       let idx = 0;
       async function worker() {
@@ -357,16 +356,6 @@
       await Promise.all(workers);
     }
 
-    // Street View Tile API の仕様(公式ドキュメントより):
-    //   - タイルのzoomは 0〜5 の固定範囲
-    //   - zoomが1上がるごとに視野角が半分になり、タイルの縦横枚数はほぼ2倍になる
-    //   - zoom=5 のときだけ、フルサイズ画像(imageWidth × imageHeight)を
-    //     tileWidth/tileHeightで割った枚数がそのままタイル格子になる
-    // これを利用し、Tile API自身のメタデータ(imageWidth/imageHeight)から、
-    // 要求するzoomでの正しいタイル格子を逆算する。
-    // 以前のバージョンは「古いJS版StreetViewServiceのworldSize」(=フルサイズ相当)を
-    // zoom換算せずそのまま使っていたため、低いzoomで存在しない座標を大量に
-    // リクエストしてしまい、ほとんどのタイルが失敗する原因になっていた。
     const TILE_API_MAX_ZOOM = 5;
 
     function computeTileGrid(zoom, imageWidth, imageHeight, tileWidth, tileHeight) {
@@ -377,9 +366,6 @@
       return { cols, rows, effectiveZoom: z };
     }
 
-    // セッション作成 → Tile API自身のメタデータ取得(格子計算・links・heading用)
-    // → そのメタデータに基づいた正しい枚数だけタイルを取得、の順で行う。
-    // メタデータとタイル配信を同じTile APIに統一することで規格のズレを避ける。
     async function fetchAndStitchTiles(panoId, zoom, apiKey) {
       const sessionRes = await fetch(`https://tile.googleapis.com/v1/createSession?key=${apiKey}`, {
         method: 'POST',
@@ -425,14 +411,11 @@
         }
       }
 
-      // 一斉リクエストではなく、同時実行数を制限して負荷・タイムアウトを避ける
       await runWithConcurrency(tasks, 6);
 
       const texture = new THREE.CanvasTexture(canvas);
       texture.needsUpdate = true;
 
-      // links / centerHeading相当もTile API自身のメタデータから取得する
-      // （古いJS版StreetViewServiceには依存しない）
       const links = (meta.links || []).map(l => ({ pano: l.panoId, heading: l.heading }));
       const centerHeading = typeof meta.heading === 'number' ? meta.heading : 0;
 
@@ -442,7 +425,6 @@
       };
     }
 
-    // キーワード検索から拡大地図を表示する処理
     function geocodeAddress() {
       const apiKey = inputApiKey.value.trim();
       const query = inputSearch.value.trim();
@@ -468,7 +450,6 @@
             inputLng.value = loc.lng();
             statusEl.textContent = `「${results[0].formatted_address}」の地図を開きました。タップで場所を選択してください。`;
 
-            // 地図を開いて検索位置へジャンプ（ズームレベル18で拡大表示）
             openMapWithLocation(loc.lat(), loc.lng(), 18);
           } else {
             statusEl.textContent = "検索エラー: 該当する場所が見つかりませんでした";
@@ -579,6 +560,22 @@
       document.head.appendChild(script);
     }
 
+    // ズームレベルに応じて青ラインの表示/非表示を切り替える関数
+    function updateStreetViewCoverage() {
+      if (!gMap || !streetViewLayer) return;
+      
+      const minZoomForCoverage = 14; // 青ラインを表示する最小ズームレベル
+      if (gMap.getZoom() >= minZoomForCoverage) {
+        if (!streetViewLayer.getMap()) {
+          streetViewLayer.setMap(gMap);
+        }
+      } else {
+        if (streetViewLayer.getMap()) {
+          streetViewLayer.setMap(null);
+        }
+      }
+    }
+
     function initMap(initialLat, initialLng, initialZoom) {
       const lat = initialLat || parseFloat(inputLat.value) || 35.681236;
       const lng = initialLng || parseFloat(inputLng.value) || 139.767125;
@@ -592,6 +589,12 @@
           streetViewControl: false,
         });
 
+        // ストリートビューカバーレイヤー（青いライン）を作成
+        streetViewLayer = new google.maps.StreetViewCoverageLayer();
+
+        // ズーム変更時に表示状態をチェック
+        gMap.addListener('zoom_changed', updateStreetViewCoverage);
+
         gMap.addListener('click', (e) => {
           inputLat.value = e.latLng.lat();
           inputLng.value = e.latLng.lng();
@@ -602,6 +605,9 @@
         gMap.setCenter({ lat, lng });
         gMap.setZoom(zoom);
       }
+
+      // 初期化時・位置変更時にも表示判定を実行
+      updateStreetViewCoverage();
     }
 
     function openMapWithLocation(lat, lng, zoom) {
