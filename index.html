@@ -2,9 +2,9 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Street View VR">
   <title>Street View 360 VR (Static Version)</title>
   <style>
@@ -25,7 +25,7 @@
     }
     .ui-panel {
       position: absolute;
-      top: 15px; left: 50%;
+      top: 20px; left: 50%;
       transform: translateX(-50%);
       z-index: 999;
       width: 90%; max-width: 420px;
@@ -34,7 +34,7 @@
       color: #fff; text-align: center;
       border: 1px solid #444;
       box-sizing: border-box;
-      max-height: 90vh;
+      max-height: 85vh;
       overflow-y: auto;
     }
     h3 { margin: 0 0 10px 0; font-size: 1.1rem; }
@@ -81,7 +81,7 @@
     #status { font-size: 0.85rem; margin-top: 10px; color: #ffcc00; word-break: break-all; }
 
     .round-btn {
-      position: absolute; top: 15px; z-index: 1001;
+      position: absolute; top: 20px; z-index: 1001;
       width: 42px; height: 42px; border-radius: 50%;
       background: rgba(0, 0, 0, 0.65); color: #fff;
       border: 1px solid #666; font-size: 1.1rem; line-height: 1;
@@ -97,13 +97,13 @@
     }
     #map { width: 100%; height: 100%; }
     #map-close {
-      position: absolute; top: 15px; right: 15px; z-index: 2001;
+      position: absolute; top: 20px; right: 15px; z-index: 2001;
       width: 42px; height: 42px; border-radius: 50%;
       background: rgba(0,0,0,0.75); color: #fff; border: 1px solid #666;
       font-size: 1.1rem;
     }
     #map-hint {
-      position: absolute; top: 15px; left: 15px; z-index: 2001;
+      position: absolute; top: 20px; left: 15px; z-index: 2001;
       background: rgba(0,0,0,0.75); color: #fff;
       padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; max-width: 60%;
     }
@@ -176,9 +176,9 @@
       arrowGroup = new THREE.Group();
       scene.add(arrowGroup);
 
-      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
       renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setScissorTest(true);
       container.appendChild(renderer.domElement);
 
@@ -462,11 +462,13 @@
         return;
       }
 
-      if (chkSaveApiKey.checked) {
-        localStorage.setItem('sv_vr_api_key', apiKey);
-      } else {
-        localStorage.removeItem('sv_vr_api_key');
-      }
+      try {
+        if (chkSaveApiKey.checked) {
+          localStorage.setItem('sv_vr_api_key', apiKey);
+        } else {
+          localStorage.removeItem('sv_vr_api_key');
+        }
+      } catch (e) { console.warn("Storage access restricted"); }
 
       statusEl.textContent = "0. 地点を解決中...";
       btnLoad.disabled = true;
@@ -554,11 +556,10 @@
       document.head.appendChild(script);
     }
 
-    // ズームレベルに応じて青ラインの表示/非表示を切り替える関数
     function updateStreetViewCoverage() {
       if (!gMap || !streetViewLayer) return;
       
-      const minZoomForCoverage = 14; // 青ラインを表示する最小ズームレベル
+      const minZoomForCoverage = 14;
       const currentZoom = gMap.getZoom();
 
       if (currentZoom >= minZoomForCoverage) {
@@ -587,10 +588,8 @@
 
         streetViewLayer = new google.maps.StreetViewCoverageLayer();
 
-        // ズーム変更時に表示状態をチェック
         gMap.addListener('zoom_changed', updateStreetViewCoverage);
 
-        // 地図描画完了（idle）後に判定を行うことで、初回読み込み時のチラつきを防止
         google.maps.event.addListenerOnce(gMap, 'idle', () => {
           updateStreetViewCoverage();
         });
@@ -624,11 +623,14 @@
       openMapWithLocation(null, null, 3);
     }
 
+    // iOS Web Appモード対応の画面角度判定
     function updateScreenOrientAngle() {
       if (screen.orientation && typeof screen.orientation.angle === 'number') {
         screenOrientAngle = screen.orientation.angle;
+      } else if (typeof window.orientation !== 'undefined') {
+        screenOrientAngle = window.orientation;
       } else {
-        screenOrientAngle = window.orientation || 0;
+        screenOrientAngle = 0;
       }
     }
 
@@ -704,7 +706,11 @@
       mapOverlay = document.getElementById('map-overlay');
       mapCloseBtn = document.getElementById('map-close');
 
-      const savedApiKey = localStorage.getItem('sv_vr_api_key');
+      let savedApiKey = null;
+      try {
+        savedApiKey = localStorage.getItem('sv_vr_api_key');
+      } catch (e) { console.warn("Storage disabled"); }
+
       if (savedApiKey) {
         inputApiKey.value = savedApiKey;
         chkSaveApiKey.checked = true;
@@ -725,6 +731,7 @@
     });
   </script>
 </head>
+
 <body>
 
   <button id="btn-toggle-ui" class="round-btn" title="UIの表示/非表示">✕</button>
