@@ -153,7 +153,7 @@
     let googleMapsLoaded = false;
     let mapInited = false;
     let gMap = null;
-    let streetViewLayer = null; // ストリートビューカバーレイヤー用の変数
+    let streetViewLayer = null;
 
     function initThree() {
       const container = document.getElementById('canvas-container');
@@ -186,8 +186,6 @@
       scene.add(light);
 
       window.addEventListener('resize', onWindowResize);
-
-      // VRゴーグル操作の感度改善：click から pointerdown に変更
       window.addEventListener('pointerdown', onTapScreen);
 
       animate();
@@ -248,7 +246,7 @@
         ringMesh.position.set(Math.sin(rad) * distance, -4, -Math.cos(rad) * distance);
         ringMesh.rotation.x = -Math.PI / 2;
 
-        const hitGeo = new THREE.SphereGeometry(3.2, 16, 16); // 照準を合わせやすいよう少し拡大
+        const hitGeo = new THREE.SphereGeometry(3.2, 16, 16);
         const hitMat = new THREE.MeshBasicMaterial({ visible: false });
         const hitMesh = new THREE.Mesh(hitGeo, hitMat);
         hitMesh.position.copy(ringMesh.position);
@@ -315,10 +313,6 @@
 
       scene.add(sphereMesh);
     }
-
-    // ============================================================
-    // タイル取得まわり
-    // ============================================================
 
     function fetchTileImage(url, retries) {
       retries = retries || 3;
@@ -565,7 +559,9 @@
       if (!gMap || !streetViewLayer) return;
       
       const minZoomForCoverage = 14; // 青ラインを表示する最小ズームレベル
-      if (gMap.getZoom() >= minZoomForCoverage) {
+      const currentZoom = gMap.getZoom();
+
+      if (currentZoom >= minZoomForCoverage) {
         if (!streetViewLayer.getMap()) {
           streetViewLayer.setMap(gMap);
         }
@@ -589,11 +585,15 @@
           streetViewControl: false,
         });
 
-        // ストリートビューカバーレイヤー（青いライン）を作成
         streetViewLayer = new google.maps.StreetViewCoverageLayer();
 
         // ズーム変更時に表示状態をチェック
         gMap.addListener('zoom_changed', updateStreetViewCoverage);
+
+        // 地図描画完了（idle）後に判定を行うことで、初回読み込み時のチラつきを防止
+        google.maps.event.addListenerOnce(gMap, 'idle', () => {
+          updateStreetViewCoverage();
+        });
 
         gMap.addListener('click', (e) => {
           inputLat.value = e.latLng.lat();
@@ -604,10 +604,8 @@
       } else {
         gMap.setCenter({ lat, lng });
         gMap.setZoom(zoom);
+        updateStreetViewCoverage();
       }
-
-      // 初期化時・位置変更時にも表示判定を実行
-      updateStreetViewCoverage();
     }
 
     function openMapWithLocation(lat, lng, zoom) {
